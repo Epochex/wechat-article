@@ -1,0 +1,1425 @@
+# code snapshot
+# Root: C:\Users\lin\Desktop\鼠鼠学习\wechat-article
+# Files: 10
+
+## TREE (filtered)
+  apps/
+    worker/
+      config.py
+      fetch_wechat.py
+      generate_newsletter.py
+      run_daily.py
+  data/
+    exports/
+    newsletter/
+    raw/
+  exporter_data/
+    kv/
+      cookie/
+  infra/
+    docker-compose.yml
+  skills/
+    ai-newsletter-news-selection/
+      SKILL.md
+    ai-newsletter-opening/
+      SKILL.md
+    ai-newsletter-opening-v2/
+      SKILL.md
+    ai-newsletter-summary-inspiration/
+      SKILL.md
+    ai-newsletter-workflow/
+      SKILL.md
+
+
+FILE: apps\worker\config.py
+ROOT = r"C:\Users\lin\Desktop\鼠鼠学习\wechat-article"
+
+EXPORTER_BASE = "http://localhost:3000"
+AUTH_KEY = "82ba9ed470dd43088e9c821d5b6f4a29"
+
+DOWNLOAD_FORMAT = "markdown"
+
+RAW_DIR = ROOT + r"\data\raw"
+EXPORTS_DIR = ROOT + r"\data\exports"
+NEWSLETTER_DIR = ROOT + r"\data\newsletter"
+
+TIME_WINDOW_DAYS = 7
+
+SOURCES = [
+    {"keyword": "36氪", "begin": 0, "size": 10},
+    {"keyword": "机器之心", "begin": 0, "size": 10},
+    {"keyword": "量子位", "begin": 0, "size": 10},
+    {"keyword": "AI科技评论", "begin": 0, "size": 10},
+    {"keyword": "甲子光年", "begin": 0, "size": 10},
+]
+
+INCLUDE_TERMS = [
+    "AI", "人工智能", "大模型", "LLM", "Agent", "RAG", "MCP",
+    "推理", "训练", "蒸馏", "对齐", "多模态", "视频生成", "图像生成",
+    "Copilot", "Claude", "Gemini", "OpenAI", "DeepSeek", "Anthropic",
+    "企业", "落地", "应用", "产品", "SaaS", "工作流", "自动化",
+    "安全", "风控", "合规", "隐私", "攻防",
+    "芯片", "GPU", "算力", "推理加速", "端侧", "边缘",
+]
+
+EXCLUDE_TERMS = [
+    "情感", "星座", "鸡汤", "段子", "八卦", "娱乐", "影视", "综艺",
+    "育儿", "高铁", "美食", "旅游", "读书", "夜读",
+]
+
+TARGET_TOTAL_MIN = 8
+TARGET_TOTAL_MAX = 12
+
+CATEGORY_QUOTA = {
+    "大模型竞技场": (2, 3),
+    "AI产品探新": (2, 3),
+    "企业AI前沿与AI原生企业": (2, 3),
+    "先行者观点": (2, 3),
+}
+
+OPENING_STYLE = "v2"
+
+NEWSLETTER_TITLE = "AI Newsletter"
+
+FILE: apps\worker\fetch_wechat.py
+import os
+import json
+import time
+import urllib.parse
+from typing import Any, Dict, List, Tuple
+
+import requests
+import config
+
+
+def _headers() -> Dict[str, str]:
+    return {"X-Auth-Key": config.AUTH_KEY}
+
+
+def _get(url: str, headers: Dict[str, str] | None = None) -> Any:
+    r = requests.get(url, headers=headers, timeout=60)
+    r.raise_for_status()
+    ct = (r.headers.get("Content-Type") or "").lower()
+    if "application/json" in ct:
+        return r.json()
+    return r.text
+
+
+def ensure_dirs():
+    os.makedirs(config.RAW_DIR, exist_ok=True)
+    os.makedirs(config.EXPORTS_DIR, exist_ok=True)
+
+
+def search_account(keyword: str) -> List[Dict[str, Any]]:
+    q = urllib.parse.quote(keyword, safe="")
+    url = f"{config.EXPORTER_BASE}/api/public/v1/account?keyword={q}&begin=0&size=20"
+    data = _get(url, headers=_headers())
+
+    if isinstance(data, dict):
+        if isinstance(data.get("list"), list):
+            return data["list"]
+        if isinstance(data.get("data"), list):
+            return data["data"]
+
+    if isinstance(data, list):
+        return data
+
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    p = os.path.join(config.EXPORTS_DIR, f"debug_search_account_{keyword}_{ts}.json")
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump({"keyword": keyword, "resp": data}, f, ensure_ascii=False, indent=2)
+    return []
+
+
+def list_articles(fakeid: str, begin: int, size: int) -> Any:
+    url = f"{config.EXPORTER_BASE}/api/public/v1/article?fakeid={urllib.parse.quote(fakeid)}&begin={begin}&size={size}"
+    return _get(url, headers=_headers())
+
+
+def download_article(url: str, fmt: str) -> str:
+    u = urllib.parse.quote(url, safe="")
+    dl = f"{config.EXPORTER_BASE}/api/public/v1/download?url={u}&format={urllib.parse.quote(fmt)}"
+    return _get(dl, headers=None)
+
+
+def _pick_first_str(d: Dict[str, Any], keys: List[str]) -> str:
+    for k in keys:
+        v = d.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return ""
+
+
+def _pick_first_int(d: Dict[str, Any], keys: List[str]) -> int:
+    for k in keys:
+        v = d.get(k)
+        if isinstance(v, int):
+            return v
+        if isinstance(v, str) and v.strip().isdigit():
+            return int(v.strip())
+    return 0
+
+
+def _extract_articles(article_list_json: Any) -> List[Dict[str, Any]]:
+    items = []
+
+    if isinstance(article_list_json, dict):
+        if isinstance(article_list_json.get("articles"), list):
+            items = article_list_json["articles"]
+        elif isinstance(article_list_json.get("list"), list):
+            items = article_list_json["list"]
+        else:
+            data = article_list_json.get("data")
+            if isinstance(data, list):
+                items = data
+            elif isinstance(data, dict) and isinstance(data.get("list"), list):
+                items = data["list"]
+    elif isinstance(article_list_json, list):
+        items = article_list_json
+
+    out: List[Dict[str, Any]] = []
+
+    def push_article(a: Dict[str, Any]):
+        u = _pick_first_str(a, ["link", "url", "content_url", "contentUrl", "source_url"])
+        if not u:
+            return
+        t = _pick_first_str(a, ["title", "digest", "name"])
+        ts = _pick_first_int(a, ["update_time", "updateTime", "datetime", "time", "publish_time", "publishTime"])
+        out.append({"title": t, "url": u, "ts": ts, "raw": a})
+
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+
+        if _pick_first_str(it, ["link", "url", "content_url", "contentUrl", "source_url"]):
+            push_article(it)
+            continue
+
+        for k in ["app_msg_list", "multi_app_msg_item_list", "articles", "list", "multi"]:
+            v = it.get(k)
+            if isinstance(v, list):
+                for a in v:
+                    if isinstance(a, dict):
+                        push_article(a)
+
+    return out
+
+
+def _safe_filename(title: str, idx: int, suffix: str) -> str:
+    safe_title = "".join(c for c in title if c not in r'\/:*?"<>|').strip()
+    if not safe_title:
+        safe_title = f"article_{idx}"
+    safe_title = safe_title[:80]
+    return f"{idx:02d}_{safe_title}{suffix}"
+
+
+def run_one_source(source: Dict[str, Any]) -> Dict[str, Any]:
+    ensure_dirs()
+
+    keyword = source["keyword"]
+    begin = int(source.get("begin", 0))
+    size = int(source.get("size", 10))
+
+    accounts = search_account(keyword)
+    if not accounts:
+        raise RuntimeError(f"search_account returned empty for keyword={keyword}. Check auth-key/login validity.")
+
+    acc = accounts[0]
+    fakeid = _pick_first_str(acc, ["fakeid", "fakeId", "id"])
+    name = _pick_first_str(acc, ["nickname", "name"]) or keyword
+    if not fakeid:
+        ts0 = time.strftime("%Y%m%d_%H%M%S")
+        p0 = os.path.join(config.EXPORTS_DIR, f"debug_account_no_fakeid_{keyword}_{ts0}.json")
+        with open(p0, "w", encoding="utf-8") as f:
+            json.dump(acc, f, ensure_ascii=False, indent=2)
+        raise RuntimeError(f"Cannot find fakeid from account search result for keyword={keyword}.")
+
+    articles_json = list_articles(fakeid, begin, size)
+
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    index_path = os.path.join(config.EXPORTS_DIR, f"index_{name}_{fakeid}_{ts}.json")
+    with open(index_path, "w", encoding="utf-8") as f:
+        json.dump(articles_json, f, ensure_ascii=False, indent=2)
+
+    articles = _extract_articles(articles_json)
+    saved: List[Dict[str, Any]] = []
+
+    for i, a in enumerate(articles, start=1):
+        title = a.get("title") or f"article_{i}"
+        url = a["url"]
+        content = download_article(url, config.DOWNLOAD_FORMAT)
+
+        suffix = ".md" if config.DOWNLOAD_FORMAT == "markdown" else ".txt"
+        out_path = os.path.join(config.RAW_DIR, f"{name}__{_safe_filename(title, i, suffix)}")
+        with open(out_path, "w", encoding="utf-8") as f:
+            if isinstance(content, str):
+                f.write(content)
+            else:
+                f.write(json.dumps(content, ensure_ascii=False, indent=2))
+
+        saved.append({"source_keyword": keyword, "source_name": name, "fakeid": fakeid, "title": title, "url": url, "ts": int(a.get("ts") or 0), "path": out_path})
+        print(f"[OK] saved {name} {i:02d}: {out_path}")
+
+    return {"source": {"keyword": keyword, "name": name, "fakeid": fakeid, "begin": begin, "size": size}, "index": index_path, "saved": saved}
+
+
+def run_all() -> Dict[str, Any]:
+    ensure_dirs()
+    all_saved: List[Dict[str, Any]] = []
+    sources_meta: List[Dict[str, Any]] = []
+    index_files: List[str] = []
+
+    for s in config.SOURCES:
+        r = run_one_source(s)
+        sources_meta.append(r["source"])
+        index_files.append(r["index"])
+        all_saved.extend(r["saved"])
+
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    manifest_path = os.path.join(config.EXPORTS_DIR, f"ingest_manifest_{ts}.json")
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "ts": ts,
+                "time_window_days": int(config.TIME_WINDOW_DAYS),
+                "sources": sources_meta,
+                "saved": all_saved,
+            },
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )
+
+    return {"manifest": manifest_path, "saved": all_saved, "indexes": index_files}
+
+
+if __name__ == "__main__":
+    run_all()
+
+FILE: apps\worker\generate_newsletter.py
+import os
+import re
+import json
+import time
+from typing import Any, Dict, List, Tuple
+
+import config
+
+
+def _ensure_dirs():
+    os.makedirs(config.EXPORTS_DIR, exist_ok=True)
+    os.makedirs(config.NEWSLETTER_DIR, exist_ok=True)
+
+
+def _latest_manifest_path() -> str:
+    if not os.path.isdir(config.EXPORTS_DIR):
+        raise RuntimeError("exports dir not found")
+    files = [f for f in os.listdir(config.EXPORTS_DIR) if f.startswith("ingest_manifest_") and f.endswith(".json")]
+    if not files:
+        raise RuntimeError("no ingest_manifest_*.json found; run fetch_wechat.run_all() first")
+    files.sort()
+    return os.path.join(config.EXPORTS_DIR, files[-1])
+
+
+def _read_json(p: str) -> Any:
+    with open(p, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _write_json(p: str, obj: Any):
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False, indent=2)
+
+
+def _now_epoch() -> int:
+    return int(time.time())
+
+
+def _within_time_window(ts: int, window_days: int) -> bool:
+    if ts <= 0:
+        return True
+    return (_now_epoch() - ts) <= int(window_days) * 86400
+
+
+def _md_extract_first_image(md: str) -> str:
+    m = re.search(r"!\[[^\]]*\]\((https?://[^)]+)\)", md)
+    return m.group(1).strip() if m else ""
+
+
+def _md_extract_title(md: str) -> str:
+    for line in md.splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        if s.startswith("#"):
+            t = s.lstrip("#").strip()
+            if t:
+                return t
+    lines = [ln.strip() for ln in md.splitlines() if ln.strip()]
+    return lines[0][:80] if lines else ""
+
+
+def _clean_md(md: str) -> str:
+    lines = md.splitlines()
+    out: List[str] = []
+    for ln in lines:
+        s = ln.strip()
+        if not s:
+            continue
+        if "javascript:void" in s:
+            continue
+        if ("{ max-width" in s) or ("wx_follow" in s) or ("page-content" in s) or ("sns_opr_btn" in s):
+            continue
+        if s.startswith("在小说阅读器中沉浸阅读"):
+            continue
+        out.append(s)
+    txt = "\n".join(out)
+    txt = re.sub(r"\n{3,}", "\n\n", txt).strip()
+    return txt
+
+
+def _term_hit_count(text: str, terms: List[str]) -> int:
+    t = text.lower()
+    c = 0
+    for w in terms:
+        if not w:
+            continue
+        if w.lower() in t:
+            c += 1
+    return c
+
+
+def _contains_any(text: str, terms: List[str]) -> bool:
+    t = text.lower()
+    for w in terms:
+        if not w:
+            continue
+        if w.lower() in t:
+            return True
+    return False
+
+
+def _category_for(text: str) -> str:
+    t = text.lower()
+    if any(k in t for k in ["benchmark", "eval", "arena", "mmlu", "swe-bench", "leaderboard", "rank", "对齐", "推理", "训练", "蒸馏", "moe", "llm", "大模型"]):
+        return "大模型竞技场"
+    if any(k in t for k in ["发布", "上线", "copilot", "agent", "workflow", "产品", "app", "sdk", "api", "插件", "平台", "saas"]):
+        return "AI产品探新"
+    if any(k in t for k in ["企业", "落地", "to b", "to-b", "工厂", "金融", "制造", "客服", "运营", "crm", "erp", "安全", "合规", "治理"]):
+        return "企业AI前沿与AI原生企业"
+    return "先行者观点"
+
+
+def _score_article(a: Dict[str, Any]) -> float:
+    base = 0.0
+    text = (a.get("title", "") + "\n" + a.get("clean_text", "")).strip()
+    base += 2.0 * _term_hit_count(text, config.INCLUDE_TERMS)
+    base -= 3.0 * (1.0 if _contains_any(text, config.EXCLUDE_TERMS) else 0.0)
+
+    ts = int(a.get("ts") or 0)
+    if ts > 0:
+        age_days = max(0.0, (_now_epoch() - ts) / 86400.0)
+        base += max(0.0, 6.0 - age_days)
+
+    ln = len(a.get("clean_text") or "")
+    if ln >= 800:
+        base += 2.0
+    elif ln >= 400:
+        base += 1.0
+    else:
+        base -= 1.0
+
+    return float(base)
+
+
+def _truncate_cn(text: str, n: int) -> str:
+    s = re.sub(r"\s+", " ", text).strip()
+    if len(s) <= n:
+        return s
+    return s[:n].rstrip() + "…"
+
+
+def _file_size_bytes(p: str) -> int:
+    try:
+        return os.path.getsize(p)
+    except Exception:
+        return 0
+
+
+def _fmt_size(n: int) -> str:
+    if n < 1024:
+        return f"{n} B"
+    if n < 1024 * 1024:
+        return f"{n/1024:.1f} KB"
+    return f"{n/1024/1024:.1f} MB"
+
+
+def _build_articles(run_id: str, manifest: Dict[str, Any]) -> Tuple[str, List[Dict[str, Any]]]:
+    saved = manifest.get("saved") or []
+    if not isinstance(saved, list):
+        raise RuntimeError("manifest.saved is not a list")
+
+    articles: List[Dict[str, Any]] = []
+
+    for it in saved:
+        if not isinstance(it, dict):
+            continue
+        p = it.get("path") or ""
+        if not isinstance(p, str) or not p or not os.path.isfile(p):
+            continue
+        with open(p, "r", encoding="utf-8", errors="ignore") as f:
+            md = f.read()
+
+        title = (it.get("title") or "").strip() or _md_extract_title(md)
+        url = (it.get("url") or "").strip()
+        ts = int(it.get("ts") or 0)
+        src = (it.get("source_name") or it.get("source_keyword") or "").strip()
+
+        clean_md = _clean_md(md)
+        cover = _md_extract_first_image(md)
+
+        combined = (title + "\n" + clean_md).strip()
+
+        if not _within_time_window(ts, int(config.TIME_WINDOW_DAYS)):
+            continue
+
+        if config.INCLUDE_TERMS and (not _contains_any(combined, config.INCLUDE_TERMS)):
+            continue
+
+        if config.EXCLUDE_TERMS and _contains_any(combined, config.EXCLUDE_TERMS):
+            continue
+
+        articles.append(
+            {
+                "title": title,
+                "url": url,
+                "ts": ts,
+                "source": src,
+                "cover_image": cover,
+                "clean_text": clean_md,
+                "raw_path": p,
+            }
+        )
+
+    out_path = os.path.join(config.EXPORTS_DIR, f"articles_{run_id}.jsonl")
+    with open(out_path, "w", encoding="utf-8") as f:
+        for a in articles:
+            f.write(json.dumps(a, ensure_ascii=False) + "\n")
+    return out_path, articles
+
+
+def _select_articles(run_id: str, articles: List[Dict[str, Any]]) -> Tuple[str, str, Dict[str, Any]]:
+    scored = []
+    for a in articles:
+        s = _score_article(a)
+        cat = _category_for(a.get("title", "") + "\n" + a.get("clean_text", ""))
+        aa = dict(a)
+        aa["category"] = cat
+        aa["score"] = s
+        scored.append(aa)
+
+    scored.sort(key=lambda x: x.get("score", 0.0), reverse=True)
+
+    quota = {k: {"min": v[0], "max": v[1], "picked": []} for k, v in config.CATEGORY_QUOTA.items()}
+
+    for a in scored:
+        cat = a.get("category")
+        if cat not in quota:
+            continue
+        if len(quota[cat]["picked"]) >= quota[cat]["max"]:
+            continue
+        quota[cat]["picked"].append(a)
+
+    picked: List[Dict[str, Any]] = []
+    for cat, q in quota.items():
+        picked.extend(q["picked"])
+
+    picked.sort(key=lambda x: x.get("score", 0.0), reverse=True)
+    if len(picked) > int(config.TARGET_TOTAL_MAX):
+        picked = picked[: int(config.TARGET_TOTAL_MAX)]
+
+    remaining = [a for a in scored if a not in picked]
+
+    if len(picked) < int(config.TARGET_TOTAL_MIN):
+        need = int(config.TARGET_TOTAL_MIN) - len(picked)
+        extra = remaining[:need]
+        picked.extend(extra)
+        remaining = remaining[need:]
+
+    selection = {
+        "run_id": run_id,
+        "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "window_days": int(config.TIME_WINDOW_DAYS),
+        "target_total_min": int(config.TARGET_TOTAL_MIN),
+        "target_total_max": int(config.TARGET_TOTAL_MAX),
+        "quota": config.CATEGORY_QUOTA,
+        "picked": picked,
+        "rejected": remaining,
+    }
+
+    sel_path = os.path.join(config.EXPORTS_DIR, f"selection_{run_id}.json")
+    _write_json(sel_path, selection)
+
+    lines = []
+    lines.append(f"# Selection Report ({run_id})")
+    lines.append("")
+    lines.append(f"- Window days: {config.TIME_WINDOW_DAYS}")
+    lines.append(f"- Picked: {len(picked)}")
+    lines.append("")
+    lines.append("## 入选清单（含栏目与评分）")
+    for i, a in enumerate(picked, 1):
+        lines.append(f"{i}. [{a['title']}]({a['url']})")
+        lines.append(f"   - 栏目: {a.get('category','')}")
+        lines.append(f"   - 评分: {a.get('score',0.0):.2f}")
+        lines.append(f"   - 来源: {a.get('source','')}")
+    lines.append("")
+    lines.append("## 淘汰清单（按评分降序，截断展示）")
+    for i, a in enumerate(remaining[:30], 1):
+        lines.append(f"{i}. {a['title']} | {a.get('category','')} | {a.get('score',0.0):.2f} | {a.get('source','')}")
+    rep_path = os.path.join(config.EXPORTS_DIR, f"selection_report_{run_id}.md")
+    with open(rep_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines).strip() + "\n")
+
+    return sel_path, rep_path, selection
+
+
+def _generate_opening(run_id: str, selection: Dict[str, Any]) -> str:
+    picked = selection.get("picked") or []
+    top_titles = [a.get("title", "") for a in picked[:6]]
+    tline = "、".join([t for t in top_titles if t][:6])
+
+    parts: List[str] = []
+    parts.append(f"本期围绕 {config.NEWSLETTER_TITLE} 的主线，是把“能力演进—产品化—组织落地”三条曲线放在同一张图里理解。入选条目共 {len(picked)} 条，主题集中在：{tline}。")
+    parts.append("")
+    parts.append("第一条曲线：能力曲线（模型与推理栈）。关注评测口径、推理成本与工程指标迁移，把“效果、时延、成本、可控性”放进可量化坐标系，而不是被单点宣称驱动。")
+    parts.append("")
+    parts.append("第二条曲线：产品曲线（Agent/工作流与交付形态）。分水岭是把不确定性压进确定性的流程：可观测中间产物、可复跑阶段、可回放决策、可回滚版本。产品化不是包装，而是失败模式显式化。")
+    parts.append("")
+    parts.append("第三条曲线：组织曲线（企业落地与治理）。从“能不能生成”转为“能不能负责”：权限、审计、数据边界、成本预算、SLA，以及跨团队接口。落地最短路径通常是先闭环，再收敛，再升级能力。")
+    parts.append("")
+    parts.append("建议阅读方式：先看栏目结构理解侧重点，再对每条新闻只抓一个可迁移的工程启发。把 skill=规格、pipeline=实现、QC=闸门，当作默认工程范式。")
+
+    text = "\n".join(parts).strip()
+    if len(text) < 1000:
+        pad = "本期内容的共同点，是把不确定性收敛为工程确定性：定义输入输出、记录关键决策、对每次运行留下可审计证据，并把质量检查前置。"
+        while len(text) < 1000:
+            text = text + "\n\n" + pad
+    if len(text) > 1500:
+        text = text[:1500].rstrip()
+
+    out_path = os.path.join(config.EXPORTS_DIR, f"opening_{run_id}.md")
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(text + "\n")
+    return out_path
+
+
+def _generate_items(run_id: str, selection: Dict[str, Any]) -> str:
+    picked = selection.get("picked") or []
+
+    lines: List[str] = []
+    for a in picked:
+        title = a.get("title", "")
+        url = a.get("url", "")
+        cat = a.get("category", "")
+        clean = a.get("clean_text", "")
+
+        desc = _truncate_cn(clean, 140)
+        if len(desc) < 100:
+            desc = _truncate_cn((title + " " + clean), 120)
+
+        if cat == "大模型竞技场":
+            insp = "把信息转成可执行动作：补齐评测口径（任务集/数据切分/成本与时延），并把结果沉淀到版本化报表中；否则任何“提升”都不可复现。"
+        elif cat == "AI产品探新":
+            insp = "关注点不在功能列表，而在失败模式：先定义输入输出与中间产物，再把关键决策（路由/检索/工具调用）写入日志与检查点，形成可回放工作流。"
+        elif cat == "企业AI前沿与AI原生企业":
+            insp = "落地优先级：权限与审计先行，其次是成本预算与SLA，再谈模型升级。把上线链路拆成可回滚阶段，避免“全链路一次性上强模型”造成不可控。"
+        else:
+            insp = "把观点抽象成原则并落到系统边界：哪些可自动化，哪些必须人工确认；哪些指标可量化，哪些只能做风险控制。用规则先闭环，再逐步引入更强能力。"
+
+        insp = _truncate_cn(insp, 200)
+        if len(insp) < 150:
+            insp = insp + "（核心是把不确定性前置收敛。）"
+            insp = _truncate_cn(insp, 200)
+
+        lines.append(f"### {title}")
+        lines.append("")
+        lines.append(f"- 栏目：{cat}")
+        lines.append(f"- 来源：{url}")
+        lines.append("")
+        lines.append(f"**描述（100–150字）**：{desc}")
+        lines.append("")
+        lines.append(f"**启发（150–200字）**：{insp}")
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+
+    out_path = os.path.join(config.EXPORTS_DIR, f"items_{run_id}.md")
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines).strip() + "\n")
+    return out_path
+
+
+def _assemble_newsletter(run_id: str, manifest_path: str, selection: Dict[str, Any], opening_path: str, items_path: str) -> str:
+    picked = selection.get("picked") or []
+
+    by_cat: Dict[str, List[Dict[str, Any]]] = {}
+    for a in picked:
+        by_cat.setdefault(a.get("category", "先行者观点"), []).append(a)
+    for k in by_cat:
+        by_cat[k].sort(key=lambda x: x.get("score", 0.0), reverse=True)
+
+    with open(opening_path, "r", encoding="utf-8") as f:
+        opening = f.read().strip()
+
+    with open(items_path, "r", encoding="utf-8") as f:
+        items_md = f.read().strip()
+
+    lines: List[str] = []
+    lines.append(f"# {config.NEWSLETTER_TITLE} ({run_id})")
+    lines.append("")
+    lines.append(f"- Manifest: {os.path.basename(manifest_path)}")
+    lines.append(f"- Window: last {config.TIME_WINDOW_DAYS} days")
+    lines.append(f"- Picked: {len(picked)}")
+    lines.append("")
+    lines.append("## 卷首语")
+    lines.append("")
+    lines.append(opening)
+    lines.append("")
+    lines.append("## 目录")
+    lines.append("")
+    idx = 1
+    for cat in config.CATEGORY_QUOTA.keys():
+        xs = by_cat.get(cat, [])
+        if not xs:
+            continue
+        lines.append(f"{idx}. {cat}（{len(xs)}）")
+        j = 1
+        for a in xs:
+            lines.append(f"   {j}. {a.get('title','')}")
+            j += 1
+        idx += 1
+    lines.append("")
+    lines.append("## 正文（摘录）")
+    lines.append("")
+    for cat in config.CATEGORY_QUOTA.keys():
+        xs = by_cat.get(cat, [])
+        if not xs:
+            continue
+        lines.append(f"## {cat}")
+        lines.append("")
+        for a in xs:
+            title = a.get("title", "")
+            url = a.get("url", "")
+            lines.append(f"### [{title}]({url})")
+            lines.append("")
+            lines.append(f"- 来源：{url}")
+            lines.append("")
+            clean = a.get("clean_text", "")
+            lines.append(_truncate_cn(clean, 220))
+            lines.append("")
+        lines.append("---")
+        lines.append("")
+
+    lines.append("## 逐条综述与启发")
+    lines.append("")
+    lines.append(items_md)
+    lines.append("")
+
+    out_path = os.path.join(config.NEWSLETTER_DIR, f"newsletter_{run_id}.md")
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines).strip() + "\n")
+    return out_path
+
+
+def _qc(run_id: str, selection: Dict[str, Any], opening_path: str, items_path: str, newsletter_path: str) -> Tuple[str, Dict[str, Any]]:
+    picked = selection.get("picked") or []
+    issues: List[Dict[str, Any]] = []
+
+    with open(opening_path, "r", encoding="utf-8") as f:
+        opening = f.read().strip()
+    if not (1000 <= len(opening) <= 1500):
+        issues.append({"type": "opening_length", "len": len(opening), "expected": "1000-1500"})
+
+    with open(items_path, "r", encoding="utf-8") as f:
+        items = f.read()
+    if "来源：" not in items:
+        issues.append({"type": "items_format", "detail": "items.md missing '来源：' lines"})
+
+    for a in picked:
+        url = (a.get("url") or "").strip()
+        if not url.startswith("http"):
+            issues.append({"type": "missing_url", "title": a.get("title", ""), "url": url})
+
+    with open(newsletter_path, "r", encoding="utf-8") as f:
+        nl = f.read()
+    if not nl.startswith("#"):
+        issues.append({"type": "newsletter_format", "detail": "missing top-level heading"})
+
+    report = {"run_id": run_id, "issues": issues, "picked": len(picked)}
+    out_path = os.path.join(config.EXPORTS_DIR, f"qc_report_{run_id}.json")
+    _write_json(out_path, report)
+    return out_path, report
+
+
+def _count_by_category(picked: List[Dict[str, Any]]) -> Dict[str, int]:
+    out: Dict[str, int] = {}
+    for a in picked:
+        c = a.get("category") or "UNKNOWN"
+        out[c] = out.get(c, 0) + 1
+    return out
+
+
+def _write_exports_readme_and_report(
+    run_id: str,
+    manifest_path: str,
+    articles_path: str,
+    selection_path: str,
+    selection_report_path: str,
+    opening_path: str,
+    items_path: str,
+    newsletter_path: str,
+    qc_path: str,
+    qc_report: Dict[str, Any],
+    selection: Dict[str, Any],
+):
+    picked = selection.get("picked") or []
+    rejected = selection.get("rejected") or []
+    by_cat = _count_by_category(picked)
+    issue_count = len(qc_report.get("issues") or [])
+
+    artifacts = [
+        ("1) Ingest manifest", manifest_path),
+        ("2) Articles (normalized) JSONL", articles_path),
+        ("3) Selection JSON", selection_path),
+        ("4) Selection report (MD)", selection_report_path),
+        ("5) Opening (MD)", opening_path),
+        ("6) Items (MD)", items_path),
+        ("7) Newsletter (MD)", newsletter_path),
+        ("8) QC report (JSON)", qc_path),
+    ]
+
+    def render_body() -> str:
+        lines: List[str] = []
+        lines.append("# Exports README")
+        lines.append("")
+        lines.append(f"- Run ID: {run_id}")
+        lines.append(f"- Time window (days): {config.TIME_WINDOW_DAYS}")
+        lines.append(f"- Picked: {len(picked)} | Rejected: {len(rejected)}")
+        lines.append(f"- QC issues: {issue_count}")
+        lines.append("")
+        lines.append("## 栏目分布（Picked）")
+        lines.append("")
+        for cat in config.CATEGORY_QUOTA.keys():
+            lines.append(f"- {cat}: {by_cat.get(cat, 0)}")
+        extra_cats = [k for k in by_cat.keys() if k not in config.CATEGORY_QUOTA]
+        for k in extra_cats:
+            lines.append(f"- {k}: {by_cat.get(k, 0)}")
+        lines.append("")
+        lines.append("## 产物清单（按流水线顺序）")
+        lines.append("")
+        for name, path in artifacts:
+            size = _fmt_size(_file_size_bytes(path))
+            lines.append(f"- {name}")
+            lines.append(f"  - Path: {path}")
+            lines.append(f"  - Size: {size}")
+        lines.append("")
+        lines.append("## QC 问题摘要")
+        lines.append("")
+        issues = qc_report.get("issues") or []
+        if not issues:
+            lines.append("- None")
+        else:
+            for i, it in enumerate(issues[:50], 1):
+                t = it.get("type", "")
+                detail = it.get("detail", "")
+                title = it.get("title", "")
+                lines.append(f"- {i}. {t} {title} {detail}".strip())
+        lines.append("")
+        return "\n".join(lines).strip() + "\n"
+
+    body = render_body()
+
+    readme_path = os.path.join(config.EXPORTS_DIR, "README.md")
+    with open(readme_path, "w", encoding="utf-8") as f:
+        f.write(body)
+
+    report_path = os.path.join(config.EXPORTS_DIR, f"PIPELINE_REPORT_{run_id}.md")
+    with open(report_path, "w", encoding="utf-8") as f:
+        f.write(body)
+
+    return readme_path, report_path
+
+
+def generate() -> Dict[str, Any]:
+    _ensure_dirs()
+
+    run_id = time.strftime("%Y%m%d_%H%M%S")
+
+    manifest_path = _latest_manifest_path()
+    manifest = _read_json(manifest_path)
+
+    articles_path, articles = _build_articles(run_id, manifest)
+    selection_path, selection_report_path, selection = _select_articles(run_id, articles)
+    opening_path = _generate_opening(run_id, selection)
+    items_path = _generate_items(run_id, selection)
+    newsletter_path = _assemble_newsletter(run_id, manifest_path, selection, opening_path, items_path)
+    qc_path, qc_report = _qc(run_id, selection, opening_path, items_path, newsletter_path)
+
+    readme_path, pipeline_report_path = _write_exports_readme_and_report(
+        run_id=run_id,
+        manifest_path=manifest_path,
+        articles_path=articles_path,
+        selection_path=selection_path,
+        selection_report_path=selection_report_path,
+        opening_path=opening_path,
+        items_path=items_path,
+        newsletter_path=newsletter_path,
+        qc_path=qc_path,
+        qc_report=qc_report,
+        selection=selection,
+    )
+
+    return {
+        "run_id": run_id,
+        "manifest": manifest_path,
+        "articles": articles_path,
+        "selection": selection_path,
+        "selection_report": selection_report_path,
+        "opening": opening_path,
+        "items": items_path,
+        "newsletter": newsletter_path,
+        "qc": qc_path,
+        "exports_readme": readme_path,
+        "pipeline_report": pipeline_report_path,
+    }
+
+
+if __name__ == "__main__":
+    r = generate()
+    print("[OK] run_id:", r["run_id"])
+    print("[OK] newsletter:", r["newsletter"])
+    print("[OK] exports README:", r["exports_readme"])
+    print("[OK] pipeline report:", r["pipeline_report"])
+    print("[OK] qc:", r["qc"])
+
+FILE: apps\worker\run_daily.py
+import fetch_wechat
+import generate_newsletter
+
+if __name__ == "__main__":
+    fetch_wechat.run_all()
+    generate_newsletter.generate()
+
+FILE: infra\docker-compose.yml
+services:
+  wechat-article-exporter:
+    image: ghcr.io/wechat-article/wechat-article-exporter:v2.3.11
+    container_name: wechat-article-exporter
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - ../exporter_data:/app/.data
+
+FILE: skills\ai-newsletter-news-selection\SKILL.md
+---
+name: ai-newsletter-news-selection
+description: 负责 AI Newsletter 的新闻搜索与筛选。运行 crawler 拉取 X/RSS/YouTube/博客等来源，按硬性门槛、分类、打分产出入选/淘汰清单。Use when the user asks to search/crawl AI news, select candidates, or run the first step of generating a newsletter issue.
+---
+
+## 1. 产出与筛选目标
+
+- **产品**：CEO 与创始人专读 AI Newsletter（高风），面向 C-suite。
+- **筛选目标**：从候选新闻中选出 8–12 条，每栏 2–3 条，能贡献**三条曲线**的增量信号并导出管理动作。
+- **三条曲线**（仅用于筛选与打分，不写入正文）：
+  - **技术曲线**：能力边界/成本结构/接口生态/产品形态变化。
+  - **组织曲线**：治理、审计、合规、跨部门协同、责任归属。
+  - **人才曲线**：岗位重构、评价标准、能力认证、培训机制。
+
+---
+
+## 2. 四个栏目（用于分类）
+
+| 栏目 | 每期条数 |
+|------|----------|
+| 大模型竞技场 | 2–3 条 |
+| AI产品探新 | 2–3 条 |
+| 企业AI前沿与AI原生企业 | 2–3 条 |
+| 先行者观点 | 2–3 条 |
+
+- 选取顺序：**硬性门槛 → 分类 → 打分**。
+- 时效：发布时间须在「今天」起算 **7 天内**。
+
+### 2.1 曲线信号定义（用于打分）
+
+- **技术曲线信号**：模型能力、定价/成本、API/生态、Copilot→Agent 等可核对变化。
+- **组织曲线信号**：权限/审计/合规、跨部门协同、AI CoE、供应风险等。
+- **人才曲线信号**：角色重构、评价标准、AI literacy、训练营等。
+- 同等条件下：**组织 > 人才 > 技术**。
+
+---
+
+## 3. 采集（Crawler）
+
+### 3.1 运行方式
+
+```bash
+pip install -r scripts/requirements-crawler.txt
+python scripts/news-crawler.py --output crawler-output/candidates.json --days 7
+```
+
+**输出**：`crawler-output/candidates.json`，含 `title`、`link`、`published`、`source`、`snippet`。
+
+**X/Twitter**：需 `TWITTER_BEARER_TOKEN`；仅拉取列表内账号（`X_HANDLES`），**只保留热度最高的 10 条**（点赞+转发+回复）。
+
+### 3.2 来源
+
+| 类型 | 说明 |
+|------|------|
+| X (Twitter) | 列表内账号，热度前 10 条 |
+| RSS/博客 | Lenny、Anthropic、OpenAI、DeepMind 等 |
+| YouTube | Karpathy、Lex Fridman、MattVidPro AI 等 |
+| 微信公众号 | 机器之心、量子位等，经 wechat-article-exporter 导出后补充 |
+
+完整列表见 content-sources.md。
+
+### 3.3 采集流程
+
+1. **必须运行 crawler**。
+2. 读取 `crawler-output/candidates.json`。
+3. 视需补充 web 检索、微信公众号；保留具体来源 URL。
+4. **禁止**未运行 crawler 时仅用 web search 生成整期。
+
+---
+
+## 4. 筛选流程（必须按顺序执行）
+
+### 4.1 硬性门槛（任一不满足直接淘汰）
+
+- **事实**：须有具体文章/页面 URL；时间、主体、事件、数字可核对。
+- **主体**：新闻主体明确。
+- **时效**：7 天内发布。
+- **不重复**：同一事件只保留 1 条；全期不跨栏重复。
+- **可落地**：能导出管理动作（治理/流程/组织/指标/生态/人才）。
+- **禁区**：纯跑分/纯融资/纯营销软文且无管理动作 → 淘汰。
+
+### 4.2 分类（单独一步）
+
+对通过门槛的每条候选归入四类之一：
+
+| 类别 | 对应栏目 |
+|------|----------|
+| 大模型 | 大模型竞技场 |
+| 产品 | AI产品探新 |
+| 企业应用 | 企业AI前沿与AI原生企业 |
+| 大V/观点 | 先行者观点 |
+
+- 规则：Karpathy、Lenny 访谈、CEO/CTO 表态 → 大V/观点。
+- 分类不写入正文。
+
+### 4.3 打分（确定性公式）
+
+**总分（1–5）= round( 0.25×栏目相关性 + 0.30×边界/规则变化 + 0.35×企业可操作性 + 0.10×风险/约束 , 1位小数 )**
+
+**四维度锚点**：
+
+- **栏目相关性**：5=高度匹配；3=可归类有偏移；1=勉强。
+- **边界/规则变化**：5=明确边界/规则变化；3=趋势但缺硬边界；1=无。
+- **企业可操作性**：5=能导出 2–3 个可验收动作；3=方向性；1=无法落地。
+- **风险/约束**：5=明确约束与规避；3=模糊；1=无。
+
+**自动淘汰**：企业可操作性 ≤2 或边界/规则 ≤2 且无管理动作 → 通常淘汰。
+
+### 4.4 入选规则
+
+- 每栏 2–3 条，总计 8–12 条。
+- X 来源：crawler 已限制 10 条；每期从 X 最多选 2–3 条写入正文。
+- Tie-breaker：官方/一手/权威 > 边界变化 > 可操作性 > 新鲜度 > 组织/人才曲线覆盖。
+
+### 4.5 输出格式
+
+**入选（按四栏分组）：**
+【标题｜发布日期｜来源URL｜分类（大模型/产品/企业应用/大V观点）｜入选理由（曲线增量）｜总分】
+
+**淘汰：**
+【标题｜淘汰原因】
+
+---
+
+## 5. 筛选说明（必须产出，供用户审阅）
+
+筛选完成后，**必须**输出以下说明，告知用户筛选理由与评分依据：
+
+### 5.1 入选条目的评分明细
+
+对每条**入选**新闻，逐条给出：
+
+| 条目 | 栏目相关性 | 边界/规则变化 | 企业可操作性 | 风险/约束 | 总分 | 说明 |
+|------|------------|---------------|--------------|-----------|------|------|
+| 标题 | 1–5 分 | 1–5 分 | 1–5 分 | 1–5 分 | 计算值 | 为何入选、贡献的曲线信号 |
+
+- 四维度各给分及简要理由（一句话）。
+- 总分按公式计算：`round(0.25×A + 0.30×B + 0.35×C + 0.10×D, 1)`。
+
+### 5.2 淘汰条目的淘汰理由
+
+对每条**淘汰**新闻，说明：
+
+- **若为门槛淘汰**：命中哪条（事实/主体/时效/不重复/可落地/禁区）。
+- **若为打分淘汰**：四维度得分与总分；为何未达入选线或同栏被挤掉。
+
+### 5.3 整体筛选理由
+
+用一段话说明：
+
+- 本期为何选这 8–12 条（栏目平衡、曲线覆盖、来源多样性等）。
+- 同栏有多条候选时，为何保留这几条、淘汰其它（Tie-breaker 应用）。
+
+FILE: skills\ai-newsletter-opening-v2\SKILL.md
+---
+name: ai-newsletter-opening-v2
+description: 负责 AI Newsletter 卷首语撰写（v2）。你不是 AI 新闻搬运工，而是把技术变化翻译成老板的成本、组织、护城河选择的人。基于本期入选新闻，用三条曲线框架做宏观总结，推动 CEO 从技术买家转型为组织架构师。Use when writing the opening essay (卷首语) for the newsletter.
+---
+
+## 0. 核心定位（一句话）
+
+你不是「AI 新闻搬运工」，你是把技术变化翻译成老板的**成本、组织、护城河选择**的人。
+
+---
+
+## 1. 角色与读者
+
+- **你是**：Steven 蒋逸明（高风数智 董事总经理），用「我」对「您（CEO）」说话；书信体 + 情报简报的专业温度。
+- **读者**：忙、焦虑、要结果的企业创始人/CEO/业务总经理。
+- **语气**：专业、犀利、强指令；允许「点名批评旧做法」。
+
+---
+
+## 2. 输入与硬约束（不可破）
+
+- **输入**：本期已入选新闻 8–12 条（只许用它们，不得引入未入选新闻）。
+- **字数**：1000–1500 字。
+- **必须覆盖**「三条曲线」，并明确写出：过去两周曲线位置/速度发生了什么变化。
+- **写作目标**：把 CEO 从「技术买家」推到「组织架构师」，让其去「掰弯组织曲线」。
+
+---
+
+## 3. 总体结构（固定骨架）
+
+严格按 5 段走，不要散：
+
+### 开篇定调（1 段）
+
+- 用一句「总判断」点明本期三条曲线整体态势（常用词：相变/旧围墙消失/收敛/奇点更具体）。
+- 立刻给 CEO 一个「我不让您焦虑技术，我要您焦虑组织」的转向。
+
+### 技术曲线（1 段）：从「惊艳→同质化/融合收敛」，智能像水电煤
+
+- **写法**：现象（本期新闻）→ 趋势词（收敛/水电煤/封装成接口）→ 对企业含义（技术不再是壁，是路）。
+- **结尾**必须抛出「差异化不在剑，在剑谱」的对照句式。
+
+### 人才曲线（1 段）：从「能力」转向「好奇心/定义知识的能力」，静态知识贬值
+
+- **逻辑**：「技术曲线在做减法（降低选择困难/门槛）」「人才曲线在做乘法（拉开人与人差距）」。
+- **必须做一次二分法**：A 类好奇者 vs B 类等待者，让 CEO 立刻想到「我公司里谁是 A 谁是 B」。
+- **必须点明**：静态知识不是护城河，护城河是「把隐性经验变成可复用逻辑/方法」。
+
+### 组织曲线（1–2 段，全文最长）：滞后从效率问题升级为管理问题；System of Record → System of Action
+
+- **必须讲清楚**：组织滞后不止慢，而是旧组织/旧软件逻辑正在失效（SaaS 采购逻辑、部门切分、权责为人设计）。
+- **必须提出**「唯一护城河」：知识的技能化（ARK/Skill 库），并给出强对比：
+  - 「买 AI 账号丢给员工」= 工具外挂
+  - 「萃取老师傅经验→写成 Prompt→封装 Skill→挂到中台供全员/Agent 调用」= 知识资产化
+- **把「奇点」定义得更具体**：ARK 与外部模型力的接驳口，以及「引擎—驾驶员—传动系统」的三件套。
+
+### 收尾行动召唤（1 段）
+
+- 不要虚口号，**必须给 CEO 3 个动作**（如盘点/萃取/封装）。
+- 结尾落在「谁先把组织曲线掰弯，谁先建立不可复制的护城河」。
+
+---
+
+## 4. 「位置变化」怎么写：强制规则
+
+每条曲线都要回答同一组问题，形成统一推理格式：
+
+1. **这两周发生了什么**？（用入选新闻做证据）
+2. **因此曲线的形态怎么变**？（更收敛/更陡/更滞后/从意愿到能力）
+3. **对 CEO 的代价是什么**？（成本/替换成本/组织摩擦/人才分化）
+4. **你要 CEO 立刻做的一个动作是什么**？（可执行、可检查）
+
+**关键**：你不是「解释 AI」，你是在解释**为什么老板的旧护城河不管用了**。标准写法如：「技术门槛消失，但旧围墙也随之消失」。
+
+---
+
+## 5. 语言与排版
+
+- **不要 bullet points**（卷首语正文保持呼吸感长短句）。
+- **允许一个强类比**，但别堆比喻；高频用已验证的：
+  - **水电煤**（智能基础设施化）
+  - **剑 vs 剑谱**（技术同质化后差异化来自组织知识）
+  - **System of Record → System of Action**（组织/系统范式切换）
+- **加粗**只强调「能让 CEO 停下来」的金句/数据点，不要全篇加粗。
+
+---
+
+## 6. 质量闸门（写完自检清单）
+
+- [ ] 是否只使用「入选新闻」，有没有偷偷加新例子？
+- [ ] 三条曲线是否都写了「过去两周位置变化」？
+- [ ] 技术段是否明确「技术不再是壁/选择焦虑下降/生态收敛」？
+- [ ] 人才段是否完成「A 类好奇者 vs B 类等待者」的组织映射？
+- [ ] 组织段是否给出「工具外挂 vs 知识资产化」的强对比，并落到 ARK/Skills？
+- [ ] 收尾是否给出 3 个可执行动作（盘点/萃取/封装）？
+
+---
+
+## 7. 可复用句式模板（保持原「声音」）
+
+### 开篇
+
+「两周过去，我们看到三条曲线发生了（相变/收敛/错位）：技术还在狂奔，但门槛在消失；人才开始两极分化；真正拖住企业的，不再是模型，而是组织。」
+
+### 技术曲线
+
+「当（本期新闻 A/B）都在把智能封装成接口，技术就从『壁』变成『路』。以后胜负不在剑的锋利，而在您手里有没有剑谱。」
+
+### 人才曲线
+
+「技术在做减法，人才在做乘法。分水岭不再是会不会，而是好不好奇、会不会把经验定义成规则。」
+
+### 组织曲线
+
+「组织的滞后已从效率问题升级为管理问题：旧架构是为人设计的，不是为人+Agent 设计的。」
+
+### 收尾动作
+
+「请把战略重心从追模型，转回到知识治理：盘点老师傅经验，萃取成共识单元，封装成可调用的 Skills——谁先把组织曲线掰弯，谁先拥有不可复制的护城河。」
+
+FILE: skills\ai-newsletter-opening\SKILL.md
+---
+name: ai-newsletter-opening
+description: 负责 AI Newsletter 的卷首语撰写。基于本期已入选新闻，用「三条曲线」框架做宏观总结，呼吁 CEO 从技术买家转型为组织架构师。Use when the user asks to write the opening essay (卷首语) for the newsletter.
+---
+
+## 1. 角色设定
+
+你是 **Steven 蒋逸明**，高风咨询旗下高风数智的董事总经理。
+
+- 15 年战略与数字化转型经验的资深合伙人。
+- 读者：高度忙碌、面临转型焦虑的**企业创始人、CEO、业务总经理**。
+- 语气：专业、犀利、一针见血（甚至有些「毒辣」）、极具前瞻性。
+- 定位：不做技术新闻搬运工，只做**商业价值的翻译官**；透过技术表象，直击老板的「钱包（成本/资产）」和「痛点（组织/人才/机制）」。
+
+---
+
+## 2. 卷首语核心要求
+
+- **字数**：1000–1500 字。
+- **输入**：本期已入选新闻（8–12 条）。
+- **任务**：基于这些新闻，运用「三条曲线」框架做**宏观总结**，指出三条曲线在过去两周的**位置变化**。
+- **写作目标**：呼吁 CEO 从「技术买家」转型为「组织架构师」，亲手「掰弯」滞后的组织曲线（如推动知识资产化、沉淀企业独家 Skills）。
+
+---
+
+## 3. 三条曲线框架（卷首语必须覆盖）
+
+### 3.1 技术曲线（指数级陡峭）
+
+- 技术门槛正在消失，大模型走向同质化、白菜价，智能变成水电煤。
+- 卷首语中须说明：技术曲线在过去两周如何变化、对成本/算力/生态的启示。
+
+### 3.2 人才曲线（震荡与两极分化）
+
+- 工具门槛归零，「能力」不再是分水岭，「好奇心」和「定义知识的能力」成为新护城河。
+- 卷首语中须说明：人才曲线在过去两周如何变化、对招聘/培养/评价的启示。
+
+### 3.3 组织曲线（最为滞后，摩擦力最大）
+
+- 旧的组织形态（传统部门划分、SaaS 采购逻辑）正在崩塌。
+- 卷首语中须说明：组织曲线如何滞后、CEO 应如何主动「掰弯」它（知识资产化、Skills 沉淀、治理机制等）。
+
+---
+
+## 4. 写作与语气规范
+
+### 4.1 视角与口吻
+
+- **始终是「我」（Steven）在对「您」（CEO）说话**；保持书信体与情报简报的专业温度。
+- 强指令性话语：例如「如果您还在用接通率考核客服主管，您只是在叠加成本。」「请冻结纯记录型 SaaS 的采购。」
+
+### 4.2 语言约束
+
+- 面向传统企业管理者，避免互联网黑话。
+- 允许一个强类比，但不要堆比喻。
+- 用加粗（**Bold**）强调最震撼 CEO 的金句和数据（如 **17 倍效能差**、**软件已死**）。
+
+### 4.3 排版
+
+- 去除枯燥的学术子弹头（Bullet points）。
+- 使用具有「呼吸感」的长短句结合。
+
+---
+
+## 5. 卷首语结构建议
+
+1. **开篇**：一句话点明本期三条曲线的整体态势（可带金句）。
+2. **技术曲线**：过去两周的位置变化；对成本/算力/生态的启示。
+3. **人才曲线**：过去两周的位置变化；对岗位/能力/护城河的启示。
+4. **组织曲线**：滞后与摩擦；CEO 为何要从技术买家转型为组织架构师；可落地的「掰弯」动作（知识资产化、Skills、治理）。
+5. **收尾**：呼应本期新闻，给出明确行动召唤。
+
+---
+
+## 6. 触发与衔接
+
+- **触发**：用户要求撰写卷首语，或完成 newsletter 时需产出卷首语。
+- **前置依赖**：须先完成新闻筛选（ai-newsletter-news-selection）并产出入选清单；卷首语基于该清单撰写，不得引入未入选的新闻。
+
+FILE: skills\ai-newsletter-summary-inspiration\SKILL.md
+---
+name: ai-newsletter-summary-inspiration
+description: 负责 AI Newsletter 的新闻综述与启发撰写。对已入选的每条新闻撰写 100–150 字描述和 150–200 字启发（管理层建议），须可落地、可验收。Use when the user asks to write summaries/inspirations for newsletter items, or to complete the writing step after news selection.
+---
+
+## 1. 每条新闻的固定结构
+
+**读者可见正文**须包含且仅包含三项：
+
+| 要素 | 要求 |
+|------|------|
+| **一段描述** | 100–150 字，含时间、主体、事件；与来源一致，不夸大。 |
+| **来源** | 直接写 URL，不写括号、注释或链接文字。 |
+| **一条启发（管理层建议）** | 150–200 字，须符合 §2 约束。 |
+
+---
+
+## 2. 启发（Inspiration）撰写规范
+
+### 2.1 启发生成的硬规则（必选）
+
+- **先结论后证据**：首句必须是「趋势/判断」，不是新闻复述。
+- **必须完成问题重述**：把问题从「模型/功能/工具」转成「组织/流程/治理/验收/主权」。
+- **必须有对照**：写出「错误路径 vs 正确路径」，并点明代价/风险。
+- **必须落到机制动作**：至少给出 2–3 个「可落地机制」，从以下列表中挑选：
+  - 权限分层 / 日志留痕 / 审计追溯 / 回滚机制
+  - 目标–约束–验收（Definition of Done）
+  - 内部评测任务集/考题（业务真实基线）
+  - 知识拆解→模板/SOP→Skill 化/可调用资产
+  - 生态绑定与可切换路径（降低断供/抬价风险）
+- **必须回扣三条曲线**：明确属于**技术/人才/组织**哪条线，并说明这条线的「斜率变化」。
+- **语言约束**：面向传统企业管理者，避免互联网黑话；允许一个强类比，但不要堆比喻。
+- **不写具体周期**：禁止 Q2、本季度、下半年、明年 Q1；可用「形成」「定期」「在规划时」。
+
+### 2.2 启发段落的模板（强烈建议固定）
+
+每段启发须自然包含以下五部分（可不写小标题，但逻辑顺序固定）：
+
+1. **一句话判断（趋势 + 换挡）**：先结论后证据。
+2. **为什么（用新闻作证据，但不复述细节）**：扼要点明来源依据。
+3. **对企业的真正影响（组织视角）**：成本/替代/边界/责任。
+4. **管理动作清单（机制级 2–3 条）**：从 §2.1 机制列表中选。
+5. **风险提示（如果不做，会以什么方式失控）**：错误路径与代价。
+
+### 2.3 字数与呈现
+
+- **150–200 字**，简体中文，面向 C-suite。
+- 呈现形式：**一段完整连贯文字**，禁止拆成小标题或 bullet；内部逻辑按 §2.2 五部分自然展开。
+
+---
+
+## 3. 反幻觉规则
+
+### 3.1 先有来源再写内容
+
+- 禁止：无可验证链接就写新闻或定性结论。
+- 正确：根据具体链接撰写描述与启发；不得编造或使用占位链接。
+
+### 3.2 事实必须有来源
+
+- 时间、主体、事件、数据须在来源中有对应表述。
+- 产品/模型/公司/人名与官方一致。
+
+### 3.3 禁止的表述（除非原文明确且附出处）
+
+- 无来源定性词：冲击/颠覆/革命/首家/最大/全面超越。
+- 无来源数据：市占率、下载量、股价涨跌幅等。
+
+### 3.4 合规
+
+- 单源连续引用不超过 30 字；改写时加说明：「内容经改写以符合授权限制。」
+
+---
+
+## 4. 文件与输出格式
+
+- **命名**：主版本 `第[N]期`，迭代版本 `第[N]版`。
+- **格式**：Markdown（草稿/编辑）；Word（审阅）；PDF（终版）。
+- 链接可访问、去除追踪参数。
+
+---
+
+## 5. 编审检查清单
+
+撰写或修改 newsletter 时逐条核对：
+
+- [ ] 每条新闻有**描述 + 来源 URL + 启发**，描述与链接一致。
+- [ ] 启发**首句是趋势/判断**，非新闻复述；**先结论后证据**。
+- [ ] 启发完成**问题重述**：从模型/功能/工具转为组织/流程/治理/验收/主权。
+- [ ] 启发有**对照**：错误路径 vs 正确路径，点明代价/风险。
+- [ ] 启发含**2–3 个可落地机制**，从 §2.1 列表中选；并给出**风险提示**（不做会如何失控）。
+- [ ] 启发**回扣三条曲线**：明确技术/人才/组织哪条线，说明斜率变化。
+- [ ] 启发为一段完整文字，150–200 字；不写 Q2 等具体周期。
+- [ ] 无未附来源的「冲击」「颠覆」「革命」；产品/模型名与官方一致。
+- [ ] 日期、数字与来源一致；无虚构或混淆。
+- [ ] 来源仅写 URL，无括号、注释或链接文字。
+- [ ] 面向传统企业管理者，避免互联网黑话；比喻不超过一个。
+
+FILE: skills\ai-newsletter-workflow\SKILL.md
+---
+name: ai-newsletter-workflow
+description: CEO 与创始人专读 AI Newsletter（高风）的完整工作流。用户要求「生成新一期」时，先执行新闻搜索筛选（ai-newsletter-news-selection），再执行新闻综述与启发（ai-newsletter-summary-inspiration）。Use when creating or editing AI newsletter content, or when the user asks to generate a new issue.
+---
+
+## 工作流概览
+
+本 workflow 拆为三个 skill，按顺序执行：
+
+| 阶段 | Skill | 职责 |
+|------|-------|------|
+| 1. 新闻搜索筛选 | **ai-newsletter-news-selection** | 运行 crawler → 硬性门槛 → 分类 → 打分 → 产出入选/淘汰清单 |
+| 2. 卷首语 | **ai-newsletter-opening** | 基于入选新闻，用三条曲线框架撰写卷首语（1000–1500 字） |
+| 3. 新闻综述和启发 | **ai-newsletter-summary-inspiration** | 对入选条目撰写描述（100–150 字）与启发（150–200 字） |
+
+---
+
+## 生成新一期时的执行顺序
+
+1. **确定基准日**：若用户给出「今天 2026.02.25」则以该日为准；否则以实际生成日为基准。7 天窗口 = [今天−6 天, 今天]。
+2. **新闻搜索筛选**：应用 **ai-newsletter-news-selection** — 运行 crawler、筛选、产出入选清单及筛选说明。
+3. **卷首语**：应用 **ai-newsletter-opening** — 基于入选新闻撰写卷首语（三条曲线框架，Steven 蒋逸明口吻）。
+4. **新闻综述和启发**：应用 **ai-newsletter-summary-inspiration** — 对入选条目撰写描述与启发。
+5. **质量检查**：事实与链接一致、无幻觉、链接可访问、无追踪参数。
+6. **输出**：按第 N 期命名，Markdown/Word/PDF 格式。
+
+---
+
+## 四个固定栏目（两阶段共用）
+
+| 栏目 | 每期条数 |
+|------|----------|
+| 大模型竞技场 | 2–3 条 |
+| AI产品探新 | 2–3 条 |
+| 企业AI前沿与AI原生企业 | 2–3 条 |
+| 先行者观点 | 2–3 条 |
+
+每期总计 8–12 条；每条只归属一个栏目；全期不重复。
+
+---
+
+## 相关 Skill
+
+- **ai-newsletter-news-selection**：采集、门槛、分类、打分、入选规则、筛选说明。
+- **ai-newsletter-opening**：卷首语撰写、三条曲线框架、Steven 蒋逸明角色设定。
+- **ai-newsletter-summary-inspiration**：描述与启发撰写、反幻觉、编审检查清单。
+

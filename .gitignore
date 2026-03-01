@@ -1,0 +1,19 @@
+# === Python cache ===
+__pycache__/
+*.py[cod]
+*$py.class
+
+# === OS / editor ===
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# === Project runtime data (DO NOT COMMIT) ===
+/data/
+/exporter_data/
+
+# === Optional: logs/temp ===
+*.log
+.tmp/
+temp/

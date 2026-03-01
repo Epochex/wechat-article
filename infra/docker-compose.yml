@@ -1,0 +1,9 @@
+services:
+  wechat-article-exporter:
+    image: ghcr.io/wechat-article/wechat-article-exporter:v2.3.11
+    container_name: wechat-article-exporter
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - ../exporter_data:/app/.data
