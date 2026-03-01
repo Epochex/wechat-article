@@ -8,6 +8,15 @@ import requests
 import config
 
 
+def _safe_print(msg: str):
+    try:
+        print(msg)
+    except UnicodeEncodeError:
+        enc = (getattr(__import__("sys"), "stdout", None).encoding or "utf-8")
+        fallback = msg.encode(enc, errors="replace").decode(enc, errors="replace")
+        print(fallback)
+
+
 def _headers() -> Dict[str, str]:
     return {"X-Auth-Key": config.AUTH_KEY}
 
@@ -220,7 +229,7 @@ def run_one_source(source: Dict[str, Any], cache: Dict[str, Any]) -> Dict[str, A
                     "path": old_path,
                     "cache_hit": True,
                 })
-                print(f"[SKIP] cached {name}: {title}")
+                _safe_print(f"[SKIP] cached {name}: {title}")
                 continue
 
         idx += 1
@@ -251,7 +260,7 @@ def run_one_source(source: Dict[str, Any], cache: Dict[str, Any]) -> Dict[str, A
             "cache_hit": False,
         })
 
-        print(f"[OK] saved {name} {idx:02d}: {out_path}")
+        _safe_print(f"[OK] saved {name} {idx:02d}: {out_path}")
 
         if sleep_s > 0:
             time.sleep(sleep_s)
